@@ -20,8 +20,7 @@ export const TestCall3: Component = () => {
   const [publishResults, setPublishResults] = createSignal<Result[]>([]);
   const [publishing, setPublishing] = createSignal(false);
   const [subscribeResults, setSubscribeResults] = createSignal<Result[]>([]);
-  const [myUsername, setMyUsername] = createSignal("user1");
-  const [participantUsername, setParticipantUsername] = createSignal("user2");
+  const [relayPath, setRelayPath] = createSignal("user1");
   let mediaRecorder: MediaRecorder | null = null;
   let wt: WebTransport | null = null;
   let subWt: WebTransport | null = null;
@@ -54,6 +53,11 @@ export const TestCall3: Component = () => {
 
   const sleep = (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, ms));
+
+  const relayTarget = () => {
+    const base = relayUrl().endsWith("/") ? relayUrl() : `${relayUrl()}/`;
+    return `${base}${relayPath()}`;
+  };
 
   const runSingleTest = async (attempt: number): Promise<Result> => {
     const start = performance.now();
@@ -111,9 +115,7 @@ export const TestCall3: Component = () => {
 
       log("Connecting to relay...");
 
-      const base = relayUrl().endsWith("/") ? relayUrl() : relayUrl() + "/";
-
-      wt = new WebTransport(`${base}${myUsername()}`);
+      wt = new WebTransport(relayTarget());
 
       await wt.ready;
 
@@ -183,9 +185,7 @@ export const TestCall3: Component = () => {
       }
 
       log("Connecting for subscribe...");
-      const base = relayUrl().endsWith("/") ? relayUrl() : relayUrl() + "/";
-
-      subWt = new WebTransport(`${base}${participantUsername()}`);
+      subWt = new WebTransport(relayTarget());
 
       await subWt.ready;
       mediaSource = new MediaSource();
@@ -347,7 +347,9 @@ export const TestCall3: Component = () => {
 
           <div class="grid md:grid-cols-3 gap-6">
             <div>
-              <label class="block text-sm mb-2 text-slate-400">Relay URL</label>
+              <label class="block text-sm mb-2 text-slate-400">
+                Relay URL (base URL)
+              </label>
               <input
                 type="text"
                 value={relayUrl()}
@@ -384,29 +386,15 @@ export const TestCall3: Component = () => {
             </div>
           </div>
 
-          <h2 class="text-lg font-semibold my-4">
-            Publish / Subscribe Path Configuration
-          </h2>
+          <h2 class="text-lg font-semibold my-4">Relay Path Configuration</h2>
           <div>
             <label class="block text-sm mb-2 text-slate-400">
-              My Username (publish path)
+              Path (shared pub/sub path)
             </label>
             <input
               type="text"
-              value={myUsername()}
-              onInput={(e) => setMyUsername(e.currentTarget.value)}
-              class="w-full px-4 py-2 rounded-lg bg-slate-900 border border-slate-700"
-            />
-          </div>
-
-          <div class="mt-2">
-            <label class="block text-sm mb-2 text-slate-400">
-              Participant Username (subscribe path)
-            </label>
-            <input
-              type="text"
-              value={participantUsername()}
-              onInput={(e) => setParticipantUsername(e.currentTarget.value)}
+              value={relayPath()}
+              onInput={(e) => setRelayPath(e.currentTarget.value)}
               class="w-full px-4 py-2 rounded-lg bg-slate-900 border border-slate-700"
             />
           </div>
