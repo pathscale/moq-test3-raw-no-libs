@@ -21,6 +21,7 @@ export const TestCall3: Component = () => {
   const [publishing, setPublishing] = createSignal(false);
   const [subscribeResults, setSubscribeResults] = createSignal<Result[]>([]);
   const [relayPath, setRelayPath] = createSignal("user1");
+  const [schemeTesting, setSchemeTesting] = createSignal(false);
   let mediaRecorder: MediaRecorder | null = null;
   let wt: WebTransport | null = null;
   let subWt: WebTransport | null = null;
@@ -57,6 +58,81 @@ export const TestCall3: Component = () => {
   const relayTarget = () => {
     const base = relayUrl().endsWith("/") ? relayUrl() : `${relayUrl()}/`;
     return `${base}${relayPath()}`;
+  };
+
+  const schemeTestUrls = () => {
+    const parsed = new URL(relayUrl());
+    const host = parsed.host;
+
+    return [`moq://${host}`, `moqt://${host}`, `https://${host}`];
+  };
+
+  const formatSchemeError = (error: unknown) => {
+    if (error instanceof Error) {
+      return {
+        name: error.name,
+        message: error.message,
+      };
+    }
+
+    return {
+      name: typeof error,
+      message: String(error),
+    };
+  };
+
+  const runSchemeExperiment = async () => {
+    if (typeof WebTransport === "undefined") {
+      log(
+        "[SCHEME_TEST] status=SKIP reason=WebTransport unsupported in this browser"
+      );
+      return;
+    }
+
+    let urls: string[];
+    try {
+      urls = schemeTestUrls();
+    } catch (error) {
+      const details = formatSchemeError(error);
+      log(
+        `[SCHEME_TEST] status=SKIP reason=invalid relay URL error_name=${details.name} error_message=${details.message}`
+      );
+      return;
+    }
+
+    setSchemeTesting(true);
+    log("[SCHEME_TEST] starting alternative scheme probe");
+
+    try {
+      for (const url of urls) {
+        let transport: WebTransport;
+
+        try {
+          transport = new WebTransport(url);
+        } catch (error) {
+          const details = formatSchemeError(error);
+          log(
+            `[SCHEME_TEST] scheme=${url} status=FAIL stage=constructor error_name=${details.name} error_message=${details.message}`
+          );
+          continue;
+        }
+
+        try {
+          await transport.ready;
+          log(`[SCHEME_TEST] scheme=${url} status=OK stage=ready`);
+        } catch (error) {
+          const details = formatSchemeError(error);
+          log(
+            `[SCHEME_TEST] scheme=${url} status=FAIL stage=ready error_name=${details.name} error_message=${details.message}`
+          );
+        } finally {
+          transport.close();
+        }
+      }
+    } finally {
+      log("[SCHEME_TEST] complete");
+      setSchemeTesting(false);
+    }
   };
 
   const runSingleTest = async (attempt: number): Promise<Result> => {
@@ -410,6 +486,18 @@ export const TestCall3: Component = () => {
               }`}
             >
               {running() ? "Running..." : "Start Connection Test"}
+            </button>
+
+            <button
+              onClick={runSchemeExperiment}
+              disabled={schemeTesting()}
+              class={`px-6 py-2 rounded-lg font-semibold transition ${
+                schemeTesting()
+                  ? "bg-slate-600 cursor-not-allowed"
+                  : "bg-amber-600 hover:bg-amber-700"
+              }`}
+            >
+              {schemeTesting() ? "Testing Schemes..." : "Run Scheme Test"}
             </button>
 
             <button
