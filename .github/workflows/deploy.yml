@@ -1,0 +1,17 @@
+name: Deploy to Surge
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: cp dist/index.html dist/200.html
+      - run: npx surge ./dist moq-test3-raw-no-libs-ci.surge.sh --token ${{ secrets.SURGE_TOKEN }}
