@@ -215,10 +215,46 @@ export const TestCall3: Component = () => {
 
       log("Requesting camera/mic...");
 
-      const media = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: { width: 1280, height: 720, frameRate: 30 },
-      });
+      let media: MediaStream;
+      try {
+        media = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: { width: 1280, height: 720, frameRate: 30 },
+        });
+      } catch (deviceErr) {
+        log(`getUserMedia failed (${(deviceErr as Error).message}), using fake media stream...`);
+        // Create fake video via canvas
+        const canvas = document.createElement("canvas");
+        canvas.width = 640;
+        canvas.height = 480;
+        const ctx2d = canvas.getContext("2d")!;
+        let hue = 0;
+        const drawFrame = () => {
+          hue = (hue + 2) % 360;
+          ctx2d.fillStyle = `hsl(${hue}, 70%, 50%)`;
+          ctx2d.fillRect(0, 0, 640, 480);
+          ctx2d.fillStyle = "white";
+          ctx2d.font = "30px monospace";
+          ctx2d.fillText(`MoQ Test ${new Date().toLocaleTimeString()}`, 50, 250);
+          requestAnimationFrame(drawFrame);
+        };
+        drawFrame();
+        const canvasStream = canvas.captureStream(30);
+
+        // Create fake audio via oscillator
+        const audioCtx = new AudioContext();
+        const osc = audioCtx.createOscillator();
+        osc.frequency.value = 440;
+        const dest = audioCtx.createMediaStreamDestination();
+        osc.connect(dest);
+        osc.start();
+
+        // Combine video + audio
+        media = new MediaStream([
+          ...canvasStream.getVideoTracks(),
+          ...dest.stream.getAudioTracks(),
+        ]);
+      }
 
       log("Connecting to relay via MOQT Client...");
 
