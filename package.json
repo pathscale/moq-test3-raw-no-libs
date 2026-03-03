@@ -11,7 +11,7 @@
   "dependencies": {
     "@pathscale/ui": "^0.0.135",
     "@solidjs/router": "^0.15.3",
-    "mp4box": "^2.3.0",
+    "mp4box": "0.5.2",
     "solid-js": "^1.9.5"
   },
   "devDependencies": {

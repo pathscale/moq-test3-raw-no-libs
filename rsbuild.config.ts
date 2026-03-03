@@ -7,7 +7,7 @@ const solidPath = path.resolve(__dirname, "node_modules/solid-js");
 
 export default defineConfig({
   plugins: [pluginBabel({ include: /\.(?:jsx|tsx|ts)$/ }), pluginSolid()],
-  source: {
+  resolve: {
     alias: { "~": "./src" },
   },
   html: {
@@ -39,23 +39,13 @@ export default defineConfig({
         conditionNames: ["browser", "import", "module", "default"],
       },
       module: {
-        rules: [
-          {
-            test: /\.(?:js|mjs)$/,
-            include: /node_modules[\\/]@moq[\\/]/,
-            loader: "builtin:swc-loader",
-            options: {
-              jsc: {
-                parser: { syntax: "ecmascript" },
-                target: "es2020",
-              },
-            },
-            type: "javascript/auto",
-          },
-        ],
         parser: {
           javascript: {
             dynamicImportMode: "eager",
+            worker: [
+              "...",
+              "*context.audioWorklet.addModule()",
+            ],
           },
         },
       },

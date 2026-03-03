@@ -1,0 +1,130 @@
+import * as Control from "./control"
+import { Objects } from "./objects"
+import { asError } from "../common/error"
+import { ControlStream } from "./stream"
+
+import { Publisher } from "./publisher"
+import { Subscriber } from "./subscriber"
+
+export class Connection {
+	// The established WebTransport session.
+	#quic: WebTransport
+
+	// Use to receive/send control messages.
+	#controlStream: ControlStream
+
+	// Use to receive/send objects.
+	#objects: Objects
+
+	// Module for contributing tracks.
+	#publisher: Publisher
+
+	// Module for distributing tracks.
+	#subscriber: Subscriber
+
+	// Async work running in the background
+	#running: Promise<void>
+
+	// Set when close() is called to suppress expected errors
+	#closed = false
+
+	constructor(quic: WebTransport, stream: ControlStream, objects: Objects) {
+		this.#quic = quic
+		this.#controlStream = stream
+		this.#objects = objects
+
+		this.#publisher = new Publisher(this.#controlStream, this.#objects)
+		this.#subscriber = new Subscriber(this.#controlStream, this.#objects)
+
+		this.#running = this.#run()
+	}
+
+	close(code = 0, reason = "") {
+		this.#closed = true
+		this.#quic.close({ closeCode: code, reason })
+	}
+
+	// Check if an error is expected during session close
+	#isCloseError(e: unknown): boolean {
+		if (this.#closed) return true
+		if (typeof WebTransportError !== "undefined" && e instanceof WebTransportError) return true
+		if (e instanceof Error) {
+			const msg = e.message
+			if (msg.includes("session is closed") || msg.includes("unexpected end of stream")) return true
+		}
+		return false
+	}
+
+	async #run(): Promise<void> {
+		await Promise.all([this.#runControl(), this.#runObjects()])
+	}
+
+	publish_namespace(namespace: string[]) {
+		return this.#publisher.publish_namespace(namespace)
+	}
+
+	publishedNamespaces() {
+		return this.#subscriber.publishedNamespaces()
+	}
+
+	subscribe(namespace: string[], track: string) {
+		return this.#subscriber.subscribe(namespace, track)
+	}
+
+	unsubscribe(track: string) {
+		return this.#subscriber.unsubscribe(track)
+	}
+
+	subscribed() {
+		return this.#publisher.subscribed()
+	}
+
+	async #runControl() {
+		// Receive messages until the connection is closed.
+		try {
+			console.log("starting control loop")
+			for (; ;) {
+				const msg = await this.#controlStream.recv()
+				await this.#recv(msg)
+			}
+		} catch (e) {
+			if (this.#isCloseError(e)) return
+			console.error("Error in control stream:", e)
+			throw e
+		}
+	}
+
+	async #runObjects() {
+		try {
+			console.log("starting object loop")
+			for (; ;) {
+				const obj = await this.#objects.recv()
+				console.log("object loop got obj", obj)
+				if (!obj) break
+
+				await this.#subscriber.recvObject(obj)
+			}
+		} catch (e) {
+			if (this.#isCloseError(e)) return
+			console.error("Error in object stream:", e)
+			throw e
+		}
+	}
+
+	async #recv(msg: Control.MessageWithType) {
+		if (Control.isPublisher(msg.type)) {
+			await this.#subscriber.recv(msg)
+		} else {
+			await this.#publisher.recv(msg)
+		}
+	}
+
+	async closed(): Promise<Error> {
+		try {
+			await this.#running
+			return new Error("closed")
+		} catch (e) {
+			return asError(e)
+		}
+	}
+}
