@@ -9,7 +9,7 @@ type Result = {
 
 export const TestCall3: Component = () => {
   const [relayUrl, setRelayUrl] = createSignal(
-    "https://us-east-1.relay.sylvan-b.com/"
+    localStorage.getItem("moq-relay-url") || "https://hk.nofilter.io"
   );
   const [attempts, setAttempts] = createSignal(20);
 
@@ -58,6 +58,47 @@ export const TestCall3: Component = () => {
   const relayTarget = () => {
     const base = relayUrl().endsWith("/") ? relayUrl() : `${relayUrl()}/`;
     return `${base}${relayPath()}`;
+  };
+
+  const isLocalhost = (url: string) => {
+    try {
+      const parsed = new URL(url);
+      return parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+    } catch {
+      return false;
+    }
+  };
+
+  const fetchCertFingerprint = async (url: string): Promise<WebTransportHash | undefined> => {
+    try {
+      const parsed = new URL(url);
+      const certUrl = `http://${parsed.host}/certificate.sha256`;
+      log(`Fetching cert fingerprint from ${certUrl}...`);
+      const response = await fetch(certUrl);
+      const hexString = (await response.text()).trim();
+      const hexBytes = new Uint8Array(hexString.length / 2);
+      for (let i = 0; i < hexBytes.length; i++) {
+        hexBytes[i] = parseInt(hexString.slice(2 * i, 2 * i + 2), 16);
+      }
+      log(`Cert fingerprint loaded (${hexBytes.length} bytes)`);
+      return { algorithm: "sha-256", value: hexBytes };
+    } catch (e) {
+      log(`Failed to fetch cert fingerprint: ${e}`);
+      return undefined;
+    }
+  };
+
+  const createWebTransport = async (url: string): Promise<WebTransport> => {
+    const options: WebTransportOptions = {};
+    let wtUrl = url;
+    const fingerprint = await fetchCertFingerprint(url);
+    if (fingerprint) {
+      options.serverCertificateHashes = [fingerprint];
+    }
+    if (isLocalhost(url)) {
+      wtUrl = url.replace(/^http:\/\//, "https://");
+    }
+    return new WebTransport(wtUrl, options);
   };
 
   const schemeTestUrls = () => {
@@ -144,7 +185,7 @@ export const TestCall3: Component = () => {
         throw new Error("WebTransport unsupported");
       }
 
-      const wt = new WebTransport(relayUrl());
+      const wt = await createWebTransport(relayUrl());
 
       await Promise.race([
         wt.ready,
@@ -191,7 +232,7 @@ export const TestCall3: Component = () => {
 
       log("Connecting to relay...");
 
-      wt = new WebTransport(relayTarget());
+      wt = await createWebTransport(relayTarget());
 
       await wt.ready;
 
@@ -261,7 +302,7 @@ export const TestCall3: Component = () => {
       }
 
       log("Connecting for subscribe...");
-      subWt = new WebTransport(relayTarget());
+      subWt = await createWebTransport(relayTarget());
 
       await subWt.ready;
       mediaSource = new MediaSource();
@@ -375,7 +416,7 @@ export const TestCall3: Component = () => {
   };
 
   const runSmokeTest = async () => {
-    if (!relayUrl().startsWith("https://")) {
+    if (!relayUrl().startsWith("https://") && !isLocalhost(relayUrl())) {
       alert("Relay URL must start with https://");
       return;
     }
@@ -426,13 +467,21 @@ export const TestCall3: Component = () => {
               <label class="block text-sm mb-2 text-slate-400">
                 Relay URL (base URL)
               </label>
-              <input
-                type="text"
+              <select
                 value={relayUrl()}
                 disabled={running()}
-                onInput={(e) => setRelayUrl(e.currentTarget.value)}
+                onChange={(e) => {
+                  const val = e.currentTarget.value;
+                  setRelayUrl(val);
+                  localStorage.setItem("moq-relay-url", val);
+                  window.location.reload();
+                }}
                 class="w-full px-4 py-2 rounded-lg bg-slate-900 border border-slate-700 focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-              />
+              >
+                <option value="http://localhost:4443">http://localhost:4443</option>
+                <option value="https://hk.nofilter.io">https://hk.nofilter.io</option>
+                <option value="https://usc.cdn.moq.dev">https://usc.cdn.moq.dev</option>
+              </select>
             </div>
 
             <div>
