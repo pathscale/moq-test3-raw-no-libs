@@ -1,6 +1,6 @@
 import { ImmutableBytesBuffer, MutableBytesBuffer, Reader, Writer } from "./buffer"
 import { KeyValuePairs } from "./base_data"
-import { Status } from "./objects"
+import { Status, streamStats } from "./objects"
 
 export interface SubgroupHeader {
     type: SubgroupType
@@ -191,14 +191,10 @@ export class SubgroupReader {
             extHeaders = await KeyValuePairs.deserialize_with_reader(this.stream)
         }
 
-        console.log("subgroup header", object_id, extHeaders, this.stream)
-
         let obj_payload_len = await this.stream.getNumberVarInt()
 
         let object_payload: Uint8Array | undefined
         let status: Status | undefined
-
-        console.log("subgroup read", object_id, obj_payload_len)
 
         if (obj_payload_len == 0) {
             status = Status.try_from(await this.stream.getNumberVarInt())
@@ -206,7 +202,6 @@ export class SubgroupReader {
             object_payload = await this.stream.read(obj_payload_len)
         }
 
-        console.log("read success??", object_id, status, extHeaders, object_payload)
         return {
             object_id,
             status,
@@ -217,5 +212,6 @@ export class SubgroupReader {
 
     async close() {
         await this.stream.close()
+        streamStats.closed++
     }
 }

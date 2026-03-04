@@ -1,11 +1,10 @@
 import { Component, createSignal } from "solid-js";
 import { Client } from "./moq/transport/client";
 import type { Connection } from "./moq/transport/connection";
-import type { SubscribeSend } from "./moq/transport/subscriber";
+import type { SubscribeSend, SubgroupData } from "./moq/transport/subscriber";
 import { Broadcast } from "./moq/contribute/broadcast";
 import * as Catalog from "./moq/media/catalog";
 import * as MP4 from "./moq/media/mp4";
-import { SubgroupReader } from "./moq/transport/subgroup";
 
 type Result = {
   attempt: number;
@@ -438,15 +437,15 @@ export const TestCall3: Component = () => {
       for (const initName of initTrackNames) {
         log(`Subscribing to init track: ${initName}`);
         const sub = await connection.subscribe(namespace, initName);
-        const segment = await sub.data();
-        if (!segment) throw new Error(`No init data for ${initName}`);
-        const chunk = await segment.read();
-        if (!chunk || !(chunk.object_payload instanceof Uint8Array)) {
+        const subData = await sub.data();
+        if (!subData) throw new Error(`No init data for ${initName}`);
+        const obj = subData.object;
+        if (!obj || !(obj.object_payload instanceof Uint8Array)) {
           throw new Error(`Invalid init data for ${initName}`);
         }
-        inits.set(initName, chunk.object_payload);
+        inits.set(initName, obj.object_payload);
         await sub.close();
-        log(`Init track ${initName}: ${chunk.object_payload.byteLength} bytes`);
+        log(`Init track ${initName}: ${obj.object_payload.byteLength} bytes`);
       }
 
       // Subscribe to video track
@@ -469,69 +468,56 @@ export const TestCall3: Component = () => {
           try {
             for (;;) {
               if (abortSignal.aborted) break;
-              const segment = await raceAbort(sub.data(), abortSignal);
-              if (!segment) break;
+              // sub.data() now returns pre-read SubgroupData — QUIC stream already closed
+              const subData = await raceAbort(sub.data(), abortSignal);
+              if (!subData) break;
 
-              if (!(segment instanceof SubgroupReader)) {
-                log(`Unexpected segment type for video`);
-                continue;
-              }
+              const obj = subData.object;
+              if (!obj || !(obj.object_payload instanceof Uint8Array)) continue;
 
-              log(`Video segment group=${segment.header.group_id}`);
-
-              // Wrap inner loop so RESET_STREAM on one segment doesn't kill the whole video loop
               try {
-                for (;;) {
-                  if (abortSignal.aborted) break;
-                  const obj = await raceAbort(segment.read(), abortSignal);
-                  if (!obj) break;
-                  if (!(obj.object_payload instanceof Uint8Array)) continue;
+                const frames = parser.decode(obj.object_payload);
+                for (const frame of frames) {
+                  if (!videoDecoder || videoDecoder.state === "closed") break;
 
-                  const frames = parser.decode(obj.object_payload);
-                  for (const frame of frames) {
-                    if (!videoDecoder || videoDecoder.state === "closed") break;
+                  if (!decoderConfigured && MP4.isVideoTrack(frame.track)) {
+                    const desc = frame.sample.description;
+                    const box = desc.avcC ?? desc.hvcC ?? desc.vpcC ?? desc.av1C;
+                    if (box) {
+                      const buffer = new MP4.Stream(undefined, 0, MP4.Stream.BIG_ENDIAN);
+                      box.write(buffer);
+                      const description = new Uint8Array(buffer.buffer, 8);
 
-                    // Configure decoder on first video frame
-                    if (!decoderConfigured && MP4.isVideoTrack(frame.track)) {
-                      const desc = frame.sample.description;
-                      const box = desc.avcC ?? desc.hvcC ?? desc.vpcC ?? desc.av1C;
-                      if (box) {
-                        const buffer = new MP4.Stream(undefined, 0, MP4.Stream.BIG_ENDIAN);
-                        box.write(buffer);
-                        const description = new Uint8Array(buffer.buffer, 8);
-
-                        videoDecoder.configure({
-                          codec: frame.track.codec,
-                          codedHeight: frame.track.video.height,
-                          codedWidth: frame.track.video.width,
-                          description,
-                        });
-                        decoderConfigured = true;
-                        waitingForKeyframe = true;
-                        log(`VideoDecoder configured: ${frame.track.codec} ${frame.track.video.width}x${frame.track.video.height}`);
-                      }
-                    }
-
-                    if (decoderConfigured && videoDecoder.state === "configured") {
-                      if (waitingForKeyframe && !frame.sample.is_sync) continue;
-                      if (frame.sample.is_sync) waitingForKeyframe = false;
-
-                      const chunk = new EncodedVideoChunk({
-                        type: frame.sample.is_sync ? "key" : "delta",
-                        data: frame.sample.data,
-                        timestamp: frame.sample.dts,
+                      videoDecoder.configure({
+                        codec: frame.track.codec,
+                        codedHeight: frame.track.video.height,
+                        codedWidth: frame.track.video.width,
+                        description,
                       });
-                      try {
-                        videoDecoder.decode(chunk);
-                      } catch (e: any) {
-                        log(`Decode error: ${e?.message}`);
-                      }
+                      decoderConfigured = true;
+                      waitingForKeyframe = true;
+                      log(`VideoDecoder configured: ${frame.track.codec} ${frame.track.video.width}x${frame.track.video.height}`);
+                    }
+                  }
+
+                  if (decoderConfigured && videoDecoder.state === "configured") {
+                    if (waitingForKeyframe && !frame.sample.is_sync) continue;
+                    if (frame.sample.is_sync) waitingForKeyframe = false;
+
+                    const chunk = new EncodedVideoChunk({
+                      type: frame.sample.is_sync ? "key" : "delta",
+                      data: frame.sample.data,
+                      timestamp: frame.sample.dts,
+                    });
+                    try {
+                      videoDecoder.decode(chunk);
+                    } catch (e: any) {
+                      log(`Decode error: ${e?.message}`);
                     }
                   }
                 }
               } catch (segErr: any) {
-                // RESET_STREAM / stream errors are normal QUIC congestion control — skip to next segment
-                console.warn(`Video segment group=${segment.header.group_id} error:`, segErr?.message);
+                console.warn(`Video segment group=${subData.header.group_id} error:`, segErr?.message);
               }
             }
           } catch (err: any) {
@@ -587,44 +573,39 @@ export const TestCall3: Component = () => {
           try {
             for (;;) {
               if (audioAbortSignal.aborted) break;
-              const segment = await raceAbort(sub.data(), audioAbortSignal);
-              if (!segment) break;
+              // sub.data() now returns pre-read SubgroupData — QUIC stream already closed
+              const subData = await raceAbort(sub.data(), audioAbortSignal);
+              if (!subData) break;
 
-              if (!(segment instanceof SubgroupReader)) continue;
+              const obj = subData.object;
+              if (!obj || !(obj.object_payload instanceof Uint8Array)) continue;
 
               try {
-                for (;;) {
-                  if (audioAbortSignal.aborted) break;
-                  const obj = await raceAbort(segment.read(), audioAbortSignal);
-                  if (!obj) break;
-                  if (!(obj.object_payload instanceof Uint8Array)) continue;
+                const frames = audioParser.decode(obj.object_payload);
+                for (const frame of frames) {
+                  if (audioDecoder.state === "closed") break;
 
-                  const frames = audioParser.decode(obj.object_payload);
-                  for (const frame of frames) {
-                    if (audioDecoder.state === "closed") break;
+                  if (!audioDecoderConfigured && MP4.isAudioTrack(frame.track)) {
+                    audioDecoder.configure({
+                      codec: frame.track.codec,
+                      sampleRate: frame.track.audio.sample_rate,
+                      numberOfChannels: frame.track.audio.channel_count,
+                    });
+                    audioDecoderConfigured = true;
+                    log(`AudioDecoder configured: ${frame.track.codec}`);
+                  }
 
-                    if (!audioDecoderConfigured && MP4.isAudioTrack(frame.track)) {
-                      audioDecoder.configure({
-                        codec: frame.track.codec,
-                        sampleRate: frame.track.audio.sample_rate,
-                        numberOfChannels: frame.track.audio.channel_count,
-                      });
-                      audioDecoderConfigured = true;
-                      log(`AudioDecoder configured: ${frame.track.codec}`);
-                    }
-
-                    if (audioDecoderConfigured && audioDecoder.state === "configured") {
-                      const chunk = new EncodedAudioChunk({
-                        type: frame.sample.is_sync ? "key" : "delta",
-                        timestamp: frame.sample.dts,
-                        duration: frame.sample.duration,
-                        data: frame.sample.data,
-                      });
-                      try {
-                        audioDecoder.decode(chunk);
-                      } catch (e: any) {
-                        log(`Audio decode error: ${e?.message}`);
-                      }
+                  if (audioDecoderConfigured && audioDecoder.state === "configured") {
+                    const chunk = new EncodedAudioChunk({
+                      type: frame.sample.is_sync ? "key" : "delta",
+                      timestamp: frame.sample.dts,
+                      duration: frame.sample.duration,
+                      data: frame.sample.data,
+                    });
+                    try {
+                      audioDecoder.decode(chunk);
+                    } catch (e: any) {
+                      log(`Audio decode error: ${e?.message}`);
                     }
                   }
                 }

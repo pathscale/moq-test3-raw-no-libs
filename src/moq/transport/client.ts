@@ -89,11 +89,9 @@ export class Client {
 		if (type !== ControlMessageType.ServerSetup) throw new Error(`server SETUP type must be ${ControlMessageType.ServerSetup}, got ${type}`)
 
 		const advertisedLength = await buffer.getU16()
-		const bufferLen = buffer.byteLength
-		if (advertisedLength !== bufferLen) {
-			throw new Error(`server SETUP message length mismatch: ${advertisedLength} != ${bufferLen}`)
-		}
 
+		// Read exactly advertisedLength bytes — the buffer may contain more data
+		// from subsequent messages sent in the same QUIC packet.
 		const payload = await buffer.read(advertisedLength)
 		const bufReader = new ImmutableBytesBuffer(payload)
 		const msg = ServerSetup.deserialize(bufReader)
@@ -106,10 +104,6 @@ export class Client {
 		if (type !== ControlMessageType.ClientSetup) throw new Error(`client SETUP type must be ${ControlMessageType.ClientSetup}, got ${type}`)
 
 		const advertisedLength = await buffer.getU16()
-		const bufferLen = buffer.byteLength
-		if (advertisedLength !== bufferLen) {
-			throw new Error(`client SETUP message length mismatch: ${advertisedLength} != ${bufferLen}`)
-		}
 
 		const payload = await buffer.read(advertisedLength)
 		const bufReader = new ImmutableBytesBuffer(payload)

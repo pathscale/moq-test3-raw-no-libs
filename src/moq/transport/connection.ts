@@ -1,5 +1,7 @@
 import * as Control from "./control"
-import { Objects } from "./objects"
+import { Objects, streamStats } from "./objects"
+import { SubgroupReader } from "./subgroup"
+import type { SubgroupData } from "./subscriber"
 import { asError } from "../common/error"
 import { ControlStream } from "./stream"
 
@@ -47,9 +49,11 @@ export class Connection {
 	// Check if an error is expected during session close
 	#isCloseError(e: unknown): boolean {
 		if (this.#closed) return true
-		if (typeof WebTransportError !== "undefined" && e instanceof WebTransportError) return true
 		if (e instanceof Error) {
 			const msg = e.message
+			// RESET_STREAM is normal congestion control — NOT a close error
+			if (msg.includes("RESET_STREAM")) return false
+			if (typeof WebTransportError !== "undefined" && e instanceof WebTransportError) return true
 			if (msg.includes("session is closed") || msg.includes("unexpected end of stream")) return true
 		}
 		return false
@@ -95,19 +99,71 @@ export class Connection {
 	}
 
 	async #runObjects() {
+		let received = 0
+		let errors = 0
+		const hb = setInterval(() => {
+			const inflight = streamStats.opened - streamStats.closed
+			console.warn(`[OBJECTS-LOOP] heartbeat: received=${received} errors=${errors} streams_open=${streamStats.opened} streams_closed=${streamStats.closed} inflight=${inflight}`)
+		}, 5000)
 		try {
-			console.log("starting object loop")
 			for (; ;) {
-				const obj = await this.#objects.recv()
-				console.log("object loop got obj", obj)
-				if (!obj) break
+				try {
+					const reader = await this.#objects.recv()
+					if (!reader) {
+						console.warn(`[OBJECTS-LOOP] recv returned undefined — loop ending`)
+						break
+					}
 
-				await this.#subscriber.recvObject(obj)
+					// Process each stream in the BACKGROUND — never block the accept loop.
+					// This prevents a slow/stuck stream from blocking all other streams.
+					received++
+					if (reader instanceof SubgroupReader) {
+						this.#processSubgroup(reader).catch((e) => {
+							errors++
+							if (!this.#isCloseError(e)) {
+								console.warn(`[OBJECTS-LOOP] stream processing error:`, e)
+							}
+						})
+					} else {
+						// Unknown reader type — close immediately
+						reader.close().catch(() => {})
+					}
+				} catch (e) {
+					errors++
+					if (this.#closed) {
+						console.warn(`[OBJECTS-LOOP] connection closed — loop ending`)
+						return
+					}
+					console.warn(`[OBJECTS-LOOP] skipping errored stream #${errors}:`, e)
+					continue
+				}
 			}
 		} catch (e) {
 			if (this.#isCloseError(e)) return
-			console.error("Error in object stream:", e)
+			console.error(`[OBJECTS-LOOP] FATAL: received=${received} errors=${errors}`, e)
 			throw e
+		} finally {
+			clearInterval(hb)
+			console.warn(`[OBJECTS-LOOP] DEAD. received=${received} errors=${errors}`)
+		}
+	}
+
+	// Read ALL objects from a subgroup stream, dispatching each to the subscriber.
+	// No timeout — streams end naturally when the publisher FINs them.
+	// This avoids sending STOP_SENDING which can cause the relay to stop forwarding.
+	async #processSubgroup(reader: SubgroupReader) {
+		try {
+			for (; ;) {
+				const obj = await reader.read()
+				if (!obj) break
+				this.#subscriber.recvData({ header: reader.header, object: obj })
+			}
+		} catch (e) {
+			if (!this.#isCloseError(e)) {
+				console.warn(`[OBJECTS-LOOP] stream read error (alias=${reader.header.track_alias}):`, e)
+			}
+		} finally {
+			try { await reader.close() } catch {}
 		}
 	}
 

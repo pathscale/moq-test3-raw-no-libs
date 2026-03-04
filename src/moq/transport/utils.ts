@@ -1,5 +1,5 @@
-export function debug(...msg: any[]) {
-    console.log("itzmanish:", ...msg)
+export function debug(..._msg: any[]) {
+    // disabled — was spamming console
 }
 
 export async function sleep(ms: number) {

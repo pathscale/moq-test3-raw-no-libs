@@ -1,14 +1,22 @@
 import * as Control from "./control"
 import { Queue, Watch } from "../common/async"
-import { Objects } from "./objects"
+import { Objects, streamStats } from "./objects"
 import type { TrackReader } from "./objects"
 import { debug } from "./utils"
 import { ControlStream } from "./stream"
-import { SubgroupReader } from "./subgroup"
+import { SubgroupReader, SubgroupObject } from "./subgroup"
+import type { SubgroupHeader } from "./subgroup"
 
 export interface TrackInfo {
 	track_alias: bigint
 	track: TrackReader | SubgroupReader
+}
+
+// Pre-read data from a SubgroupReader — the QUIC stream has already been closed.
+// This prevents MAX_STREAMS exhaustion by never queuing open stream handles.
+export interface SubgroupData {
+	header: SubgroupHeader
+	object?: SubgroupObject
 }
 
 export class Subscriber {
@@ -180,29 +188,39 @@ export class Subscriber {
 		await subscribe.onDone(msg.code, msg.stream_count, msg.reason)
 	}
 
-	async recvObject(reader: TrackReader | SubgroupReader) {
-		console.log("got object on recvObject", reader)
-		// Get track alias from reader header
-		const track_alias = reader.header.track_alias
-
-		// Map track alias back to subscription ID
+	// Called by connection with pre-read data (QUIC stream already closed)
+	recvData(data: SubgroupData) {
+		const track_alias = data.header.track_alias
 		const subscriptionId = this.#aliasToSubscriptionMap.get(track_alias)
-		console.log("got subscriptionId", subscriptionId)
-		const callback = async (id: bigint) => {
+		const dispatch = (id: bigint) => {
 			const subscribe = this.#subscribe.get(id)
 			if (!subscribe) {
-				throw new Error(`data for unknown subscription: ${id}`)
+				console.warn(`[SUBSCRIBER] data for unknown subscription: ${id}`)
+				return
 			}
-			console.log("doing subscribe on data", reader)
-			return subscribe.onData(reader)
+			subscribe.onSubgroupData(data)
 		}
 		if (subscriptionId === undefined) {
-			console.warn(`Exception track alias ${track_alias} not found in aliasToSubscriptionMap.`)
-			this.#pendingTrack.set(track_alias, callback)
+			// Buffer the first data for this alias until SUBSCRIBE_OK arrives
+			const prev = this.#pendingTrack.get(track_alias)
+			if (prev) {
+				// Already have pending — drop this one (it's just data, no stream to leak)
+				return
+			}
+			console.warn(`[SUBSCRIBER] buffering data for unknown alias ${track_alias} until SUBSCRIBE_OK`)
+			this.#pendingTrack.set(track_alias, (id: bigint) => {
+				dispatch(id)
+				return Promise.resolve()
+			})
 			return
 		}
 
-		await callback(subscriptionId)
+		dispatch(subscriptionId)
+	}
+
+	// Legacy method kept for compatibility — but connection now uses recvData() instead
+	recvObject(reader: TrackReader | SubgroupReader) {
+		reader.close().catch(() => {})
 	}
 }
 
@@ -252,8 +270,10 @@ export class SubscribeSend {
 	readonly namespace: string[]
 	readonly track: string
 
-	// A queue of received streams for this subscription.
-	#data = new Queue<TrackReader | SubgroupReader>()
+	// Queue holds pre-read data (NOT open stream handles).
+	// This prevents MAX_STREAMS exhaustion — QUIC streams are read and closed
+	// immediately in onData(), never buffered open.
+	#data = new Queue<SubgroupData>(16)
 
 	constructor(control: ControlStream, id: bigint, namespace: string[], track: string) {
 		this.#control = control // so we can send messages
@@ -267,13 +287,11 @@ export class SubscribeSend {
 	}
 
 	async close(_code = 0n, _reason = "") {
-		// TODO implement full unsubscribe via control message
-		// For now, close the data queue so data() returns undefined
 		await this.#data.close()
 	}
 
 	onOk(trackAlias: bigint) {
-		console.log("setting track alias", trackAlias)
+		console.warn(`[SUBSCRIBER] track alias set: ${trackAlias}`)
 		this.#trackAlias = trackAlias
 	}
 
@@ -295,13 +313,22 @@ export class SubscribeSend {
 		return await this.#data.abort(err)
 	}
 
-	async onData(reader: TrackReader | SubgroupReader) {
-		console.log("subscribe send onData", reader)
-		if (!this.#data.closed()) await this.#data.push(reader)
+	// Serialized push chain for queuing pre-read data
+	#pushChain: Promise<void> = Promise.resolve()
+
+	// Called with pre-read data (QUIC stream already closed by connection loop)
+	onSubgroupData(subData: SubgroupData) {
+		this.#pushChain = this.#pushChain.then(async () => {
+			if (!this.#data.closed()) {
+				await this.#data.push(subData)
+			}
+		}).catch((e) => {
+			console.warn("Failed to push data to subscription queue:", e)
+		})
 	}
 
-	// Receive the next a readable data stream
-	async data() {
+	// Receive the next pre-read subgroup data
+	async data(): Promise<SubgroupData | undefined> {
 		return await this.#data.next()
 	}
 }

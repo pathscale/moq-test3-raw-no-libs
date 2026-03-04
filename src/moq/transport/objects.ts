@@ -217,8 +217,14 @@ export namespace ObjectDatagram {
 	}
 }
 
+// Global stream tracking for debugging MAX_STREAMS exhaustion
+export const streamStats = { opened: 0, closed: 0 }
+
 export class Objects {
 	private quic: WebTransport
+	// Keep a persistent reader — never release the lock between reads.
+	// Releasing and re-acquiring loses streams that arrive in the gap.
+	private incomingReader: ReadableStreamDefaultReader<ReadableStream<Uint8Array>> | undefined
 
 	constructor(quic: WebTransport) {
 		this.quic = quic
@@ -246,23 +252,24 @@ export class Objects {
 	}
 
 	async recv(): Promise<TrackReader | SubgroupReader | undefined> {
-		console.log("Objects.recv waiting for streams")
-		const streams = this.quic.incomingUnidirectionalStreams.getReader()
+		// Lazily acquire a persistent reader — reuse across ALL calls.
+		// Creating/releasing a new reader per call loses streams in the gap.
+		if (!this.incomingReader) {
+			this.incomingReader = this.quic.incomingUnidirectionalStreams.getReader()
+		}
 
-		console.log("Objects.recv got streams", streams)
-		const { value, done } = await streams.read()
-		console.log("Objects.recv got value, done", value, done)
-		streams.releaseLock()
-
+		const { value, done } = await this.incomingReader.read()
 		if (done) return
 
+		streamStats.opened++
 		const r = new ReadableStreamBuffer(value)
-		const type = await r.getNumberVarInt()
 
-		// Try to parse as SubgroupType
+		// Wrap ALL parsing in try/catch — any error (including RESET_STREAM during
+		// header read) must close the stream, otherwise the QUIC stream slot leaks
+		// and eventually exhausts MAX_STREAMS.
 		try {
+			const type = await r.getNumberVarInt()
 			const subgroupType = SubgroupType.try_from(type)
-			console.log("Objects.recv got type", subgroupType)
 
 			const track_alias = await r.getVarInt()
 			const group_id = await r.getNumberVarInt()
@@ -273,7 +280,6 @@ export class Objects {
 			} else if (SubgroupType.isSubgroupIdZero(subgroupType)) {
 				subgroup_id = 0
 			} else {
-				// Subgroup ID is first object ID - will be set when reading first object
 				subgroup_id = undefined
 			}
 
@@ -287,13 +293,12 @@ export class Objects {
 				publisher_priority,
 			}
 
-			console.log("Objects.recv got subgroup header", h)
-
 			return new SubgroupReader(h, r)
 		} catch (e) {
-			// Not a subgroup type, might be datagram or other type
-			console.log("transport/objects.ts: unknown stream type: ", type)
-			throw new Error(`unknown stream type: ${type}`)
+			// ALWAYS close the stream on ANY error to free the QUIC stream slot
+			try { await r.close() } catch {}
+			streamStats.closed++
+			throw e
 		}
 	}
 }

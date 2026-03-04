@@ -223,17 +223,23 @@ export class Broadcast {
 		// The moq-dev relay rejects non-zero object ID deltas.
 		// Always write object_id=0 so every delta is zero.
 		const chunks = segment.chunks().getReader()
-		for (; ;) {
-			const { value, done } = await chunks.read()
-			if (done) break
+		try {
+			for (; ;) {
+				const { value, done } = await chunks.read()
+				if (done) break
 
-			await stream.write({
-				object_id: 0,
-				object_payload: value,
-			})
+				await stream.write({
+					object_id: 0,
+					object_payload: value,
+				})
+			}
+		} catch (e) {
+			console.warn(`Segment ${segment.id} write error:`, (e as Error)?.message)
+		} finally {
+			chunks.releaseLock()
+			// Always close the QUIC stream — on success AND error
+			try { await stream.close() } catch {}
 		}
-
-		await stream.close()
 	}
 
 	// Attach the captured video stream to the given video element.

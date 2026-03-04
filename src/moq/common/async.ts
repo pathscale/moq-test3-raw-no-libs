@@ -90,9 +90,13 @@ export class Queue<T> {
 	}
 
 	async push(v: T) {
+		if (this.#closed) return
 		const w = this.#stream.writable.getWriter()
-		await w.write(v)
-		w.releaseLock()
+		try {
+			await w.write(v)
+		} finally {
+			w.releaseLock()
+		}
 	}
 
 	async next(): Promise<T | undefined> {
@@ -106,14 +110,27 @@ export class Queue<T> {
 
 	async abort(err: Error) {
 		if (this.#closed) return
-		await this.#stream.writable.abort(err)
 		this.#closed = true
+		try {
+			const w = this.#stream.writable.getWriter()
+			await w.abort(err)
+			w.releaseLock()
+		} catch {
+			// Stream may already be closed or errored
+		}
 	}
 
 	async close() {
 		if (this.#closed) return
-		await this.#stream.writable.close()
 		this.#closed = true
+		try {
+			// Acquire writer lock to avoid "Cannot close a locked stream" when push() is in-flight
+			const w = this.#stream.writable.getWriter()
+			await w.close()
+			w.releaseLock()
+		} catch {
+			// Stream may already be closed or errored — that's fine
+		}
 	}
 
 	closed() {

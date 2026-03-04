@@ -117,12 +117,11 @@ export default class Player extends EventTarget {
 		const sub = await this.#connection.subscribe([namespace], name)
 		try {
 			console.log("waiting for init data")
-			const init = await Promise.race([sub.data(), this.#running])
-			if (!init) throw new Error("no init data")
+			const subData = await Promise.race([sub.data(), this.#running])
+			if (!subData) throw new Error("no init data")
 
 			console.log("got init data")
-			// We don't care what type of reader we get, we just want the payload.
-			const chunk = await init.read()
+			const chunk = subData.object
 			if (!chunk) throw new Error("no init chunk")
 			if (!(chunk.object_payload instanceof Uint8Array)) throw new Error("invalid init chunk")
 
@@ -156,12 +155,8 @@ export default class Player extends EventTarget {
 			console.log("starting segment data loop")
 			for (; ;) {
 				console.log("waiting for segment data")
-				const segment = await Promise.race([sub.data(), this.#running])
-				if (!segment) continue
-
-				if (!(segment instanceof SubgroupReader)) {
-					throw new Error(`expected group reader for segment: ${track.name}`)
-				}
+				const subData = await Promise.race([sub.data(), this.#running])
+				if (!subData) continue
 
 				if (kind == "unknown") {
 					throw new Error(`unknown track kind: ${track.name}`)
@@ -176,15 +171,16 @@ export default class Player extends EventTarget {
 					eventOfFirstSegmentSent = true
 				}
 
-				const [buffer, stream] = segment.stream.release() as [Uint8Array, ReadableStream<Uint8Array>]
-
-				this.#backend.segment({
-					init: track.initTrack,
-					kind,
-					header: segment.header,
-					buffer,
-					stream,
-				})
+				// Data is pre-read — pass it to the backend
+				if (subData.object?.object_payload) {
+					this.#backend.segment({
+						init: track.initTrack,
+						kind,
+						header: subData.header,
+						buffer: subData.object.object_payload,
+						stream: new ReadableStream(), // empty — data already read
+					})
+				}
 			}
 		} catch (error) {
 			if (error instanceof Error && error.message.includes("cancelled")) {

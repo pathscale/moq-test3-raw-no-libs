@@ -410,8 +410,14 @@ export class ReadableStreamBuffer implements Reader {
     }
 
     async close() {
-        this.reader.releaseLock()
-        await this.readableStream.cancel()
+        // Use cancel() instead of releaseLock() — cancel() works even when
+        // there's a pending read(), while releaseLock() throws in that case.
+        // This is critical for timeout-based stream cleanup.
+        try {
+            await this.reader.cancel()
+        } catch {
+            // Stream may already be closed/cancelled
+        }
     }
 
     release(): [Uint8Array, ReadableStream<Uint8Array>] {

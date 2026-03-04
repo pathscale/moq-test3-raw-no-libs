@@ -51,15 +51,12 @@ export async function fetch(connection: Connection, namespace: string[]) {
 	const subscribe = await connection.subscribe(namespace, ".catalog")
 	try {
 		debug("catalog subscribe", subscribe)
-		const segment = await subscribe.data()
-		if (!segment) throw new Error("no catalog data")
+		const subData = await subscribe.data()
+		if (!subData) throw new Error("no catalog data")
 
-		console.log("catalog segment", segment)
-		const chunk = await segment.read()
+		const chunk = subData.object
 		if (!chunk) throw new Error("no catalog chunk")
 
-		console.log("catalog chunk", chunk)
-		await segment.close()
 		await subscribe.close() // we done
 
 		if (chunk.object_payload instanceof Uint8Array) {
